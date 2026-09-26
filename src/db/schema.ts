@@ -32,3 +32,13 @@ export const miniScores = pgTable("mini_scores", {
   plays: integer("plays").notNull().default(1),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+/** Multiplayer rooms shared across all Netlify serverless instances */
+export const netRooms = pgTable("net_rooms", {
+  id: text("id").primaryKey(),
+  code: text("code").notNull().unique(),
+  kind: text("kind").notNull(), // hub | match
+  status: text("status").notNull().default("waiting"),
+  data: jsonb("data").notNull().default({}),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});

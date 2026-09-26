@@ -133,9 +133,17 @@ export function ShopModal({ profile, onBuy, onEquip, onOpenCase, onClose, onWatc
       )}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
         {items.map((it) => {
-          const owned = profile.owned.includes(it.id);
+          const pack = it.cat === "emoji" ? EMOJI_PACKS[it.id] : null;
+          const unlocked = profile.unlockedEmojis ?? [];
+          const packHave = pack ? pack.filter((e) => unlocked.includes(e)).length : 0;
+          const packComplete = !!(pack && packHave >= 4);
+          // each owned emoji from pack makes pack 15% cheaper
+          const price = pack && it.price > 0
+            ? Math.max(0, Math.round(it.price * (1 - 0.15 * packHave)))
+            : it.price;
+          const owned = profile.owned.includes(it.id) || packComplete;
           const equipped = profile.equipped[it.cat] === it.id;
-          const canBuy = profile.coins >= it.price;
+          const canBuy = profile.coins >= price && !packComplete;
           const rc = RARITY_COLOR[it.rarity];
           return (
             <div key={it.id} className="relative flex flex-col items-center rounded-2xl border-2 p-3 transition" style={{ borderColor: equipped ? "#7dffb0" : `${rc}88`, background: equipped ? "rgba(125,255,176,0.14)" : `linear-gradient(180deg, ${rc}22, rgba(255,255,255,0.04))` }}>
@@ -145,13 +153,20 @@ export function ShopModal({ profile, onBuy, onEquip, onOpenCase, onClose, onWatc
               </div>
               <div className="text-center text-sm font-extrabold">{itemName(it.id)}</div>
               {cat === "emoji" && <div className="mt-1 text-center text-lg leading-tight">{EMOJI_PACKS[it.id]?.join("")}</div>}
+              {pack && <div className="mt-0.5 text-[10px] font-bold text-white/50">{packHave}/4</div>}
               <div className="mt-2 w-full">
-                {equipped ? (
+                {packComplete ? (
+                  <div className="rounded-xl bg-[#7dffb0]/80 py-1.5 text-center text-sm font-black text-[#1b1440]">Разблокировано</div>
+                ) : equipped ? (
                   <div className="rounded-xl bg-[#7dffb0] py-1.5 text-center text-sm font-black text-[#1b1440]">{t("shop.equipped")}</div>
-                ) : owned ? (
+                ) : owned && !pack ? (
+                  <Btn className="w-full text-sm" color="#3a86ff" onClick={() => onEquip(it.id)}>{t("shop.equip")}</Btn>
+                ) : owned && pack ? (
                   <Btn className="w-full text-sm" color="#3a86ff" onClick={() => onEquip(it.id)}>{t("shop.equip")}</Btn>
                 ) : (
-                  <Btn className="w-full text-sm" color={canBuy ? "#ff9f1c" : "#555"} disabled={!canBuy} onClick={() => onBuy(it.id)}>🪙 {it.price}</Btn>
+                  <Btn className="w-full text-sm" color={canBuy ? "#ff9f1c" : "#555"} disabled={!canBuy} onClick={() => onBuy(it.id)}>
+                    🪙 {price}{price < it.price ? <span className="ml-1 text-[10px] line-through opacity-70">{it.price}</span> : null}
+                  </Btn>
                 )}
               </div>
             </div>
@@ -164,14 +179,14 @@ export function ShopModal({ profile, onBuy, onEquip, onOpenCase, onClose, onWatc
 }
 
 // ---------------- Case opening ----------------
-export function CaseOpenOverlay({ def, owned, unlockedColors, onDone, onClose, onEquip }: {
-  def: CaseDef; owned: string[]; unlockedColors: string[];
+export function CaseOpenOverlay({ def, owned, unlockedColors, unlockedEmojis = [], onDone, onClose, onEquip }: {
+  def: CaseDef; owned: string[]; unlockedColors: string[]; unlockedEmojis?: string[];
   onDone: (res: CaseResult) => void;
   onClose: () => void; onEquip: (id: string) => void;
 }) {
   const [phase, setPhase] = useState<"shake" | "reel" | "done">("shake");
   const [reelIdx, setReelIdx] = useState(0);
-  const resultRef = useRef(rollCase(def, owned, unlockedColors));
+  const resultRef = useRef(rollCase(def, owned, unlockedColors, Math.random, unlockedEmojis));
   const reported = useRef(false);
   const strip = useRef<(ShopItem | { icon: string; rarity: Rarity; id: string; cat: Category })[]>([]);
   if (!strip.current.length) {
@@ -179,7 +194,9 @@ export function CaseOpenOverlay({ def, owned, unlockedColors, onDone, onClose, o
     const arr: typeof strip.current = [];
     for (let i = 0; i < 26; i++) arr.push(pool[Math.floor(Math.random() * pool.length)]);
     const r = resultRef.current;
-    if (r.color) {
+    if (r.emoji) {
+      arr[24] = { id: "emoji_drop", icon: r.emoji, rarity: "rare", cat: "emoji" };
+    } else if (r.color) {
       arr[24] = { id: "color_drop", icon: "🎨", rarity: def.id === "case_epic" ? "legendary" : "epic", cat: "skin" };
     } else if (r.item) {
       arr[24] = r.item;
@@ -216,9 +233,13 @@ export function CaseOpenOverlay({ def, owned, unlockedColors, onDone, onClose, o
 
   const res = resultRef.current;
   const shown = phase === "done"
-    ? (res.color ? { icon: "🎨", rarity: (def.id === "case_epic" ? "legendary" : "epic") as Rarity, id: "color_drop", cat: "skin" as Category } : res.item!)
+    ? (res.emoji
+      ? { icon: res.emoji, rarity: "rare" as Rarity, id: "emoji_drop", cat: "emoji" as Category }
+      : res.color
+        ? { icon: "🎨", rarity: (def.id === "case_epic" ? "legendary" : "epic") as Rarity, id: "color_drop", cat: "skin" as Category }
+        : res.item!)
     : strip.current[reelIdx % strip.current.length];
-  const rc = RARITY_COLOR[shown.rarity] ?? "#b8c0d8";
+  const rc = RARITY_COLOR[shown?.rarity ?? "common"] ?? "#b8c0d8";
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#0d0826]/80 p-3 backdrop-blur-sm">
       <div className="panel modal-anim w-full max-w-md p-6 text-center text-white">
@@ -236,16 +257,22 @@ export function CaseOpenOverlay({ def, owned, unlockedColors, onDone, onClose, o
             <div className="relative mx-auto mt-4 flex h-40 w-40 items-center justify-center">
               <div className="rays absolute inset-[-30%] rounded-full opacity-50" style={{ background: `conic-gradient(${rc}, transparent 20%, ${rc} 40%, transparent 60%, ${rc} 80%, transparent)` }} />
               <div className="case-burst relative flex h-32 w-32 items-center justify-center rounded-3xl" style={{ background: `${rc}33`, border: `4px solid ${rc}`, boxShadow: `0 0 40px ${rc}` }}>
-                {res.color ? (
+                {res.emoji ? (
+                  <span className="text-7xl">{res.emoji}</span>
+                ) : res.color ? (
                   <div className="h-16 w-16 rounded-full border-4 border-white shadow-lg" style={{ background: res.color }} />
                 ) : (
-                  <span className="text-7xl">{res.item!.icon}</span>
+                  <span className="text-7xl">{res.item?.icon ?? "🎁"}</span>
                 )}
               </div>
             </div>
             <div className="mt-4 text-xs font-black uppercase tracking-widest" style={{ color: rc }}>{rarityLabel(shown.rarity)}</div>
-            <div className="text-3xl font-black">{res.color ? t("case.colorDrop") : itemName(res.item!.id)}</div>
-            <div className="mt-1 text-sm text-white/60">{res.color ? t("case.colorHint") : catLabel(res.item!.cat)}</div>
+            <div className="text-3xl font-black">
+              {res.emoji ? res.emoji : res.color ? t("case.colorDrop") : res.item ? itemName(res.item.id) : "?"}
+            </div>
+            <div className="mt-1 text-sm text-white/60">
+              {res.emoji ? t("cat.emoji") : res.color ? t("case.colorHint") : res.item ? catLabel(res.item.cat) : ""}
+            </div>
             {res.duplicate ? (
               <div className="mt-3 rounded-xl bg-[#ffd23f]/20 py-2 text-lg font-black text-[#ffd23f]">{t("case.duplicate", { n: res.refund })}</div>
             ) : (
@@ -263,10 +290,11 @@ export function CaseOpenOverlay({ def, owned, unlockedColors, onDone, onClose, o
 }
 
 // ---------------- Profile ----------------
-export function ProfileModal({ profile, name, user, onColor, onNickColor, onName, onClose, onAuth, onLogout }: {
+export function ProfileModal({ profile, name, user, onColor, onNickColor, onName, onClose, onAuth, onLogout, onDesign }: {
   profile: Profile; name: string; user: { username: string } | null;
   /** Select unlocked colour, or buy+select locked one */
   onColor: (c: string) => void; onNickColor?: (c: string) => void; onName: (n: string) => void; onClose: () => void; onAuth: () => void; onLogout: () => void;
+  onDesign?: () => void;
 }) {
   const s = profile.stats;
   const [nm, setNm] = useState(name);
@@ -298,6 +326,9 @@ export function ProfileModal({ profile, name, user, onColor, onNickColor, onName
               </>
             )}
           </div>
+          {onDesign && (
+            <Btn className="w-full text-sm" color="#7b5cff" onClick={onDesign}>🎨 Дизайн персонажа</Btn>
+          )}
           <div className="rounded-2xl bg-white/5 p-3">
             <div className="mb-2 text-sm font-bold text-white/70">{t("prof.color")}</div>
             <div className="mb-2 text-[11px] text-white/50">{t("prof.colorHintCase")}</div>
@@ -391,7 +422,7 @@ export function SettingsModal({ settings, onChange, onClose, onGyroRequest, onGy
   settings: Settings; onChange: (s: Settings) => void; onClose: () => void;
   onGyroRequest: () => Promise<boolean>; onGyroCalibrate: () => void; isTouch: boolean;
 }) {
-  const [tab, setTab] = useState<"game" | "perf" | "touch">("game");
+  const [tab, setTab] = useState<"game" | "perf" | "touch" | "admin">("game");
   const [gyroMsg, setGyroMsg] = useState("");
   const set = <K extends keyof Settings>(k: K, v: Settings[K]) => onChange({ ...settings, [k]: v });
   const setQuality = (q: Quality) => onChange({ ...settings, quality: q, ...QUALITY_PRESETS[q] } as Settings);
@@ -423,7 +454,7 @@ export function SettingsModal({ settings, onChange, onClose, onGyroRequest, onGy
   return (
     <Modal title={t("set.title")} onClose={onClose}>
       <div className="mb-4 flex gap-2">
-        {([["game", t("set.tabGame")], ["perf", t("set.tabPerf")], ["touch", t("set.tabTouch")]] as const).map(([id, label]) => (
+        {([["game", t("set.tabGame")], ["perf", t("set.tabPerf")], ["touch", t("set.tabTouch")], ["admin", "🛡️ Admin"]] as const).map(([id, label]) => (
           <button key={id} onClick={() => { sfx.click(); setTab(id); }} className={`flex-1 rounded-xl py-2 font-black ${tab === id ? "bg-[#ffd23f] text-[#1b1440]" : "bg-white/10"}`}>{label}</button>
         ))}
       </div>
@@ -505,6 +536,32 @@ export function SettingsModal({ settings, onChange, onClose, onGyroRequest, onGy
           {gyroMsg && <div className="rounded-xl bg-[#06d6a0]/20 p-2 text-center text-sm font-bold">{gyroMsg}</div>}
           <div className="rounded-xl bg-black/20 p-3 text-sm text-white/70">{t("set.gyroHint")}</div>
           {!isTouch && <div className="rounded-xl bg-black/20 p-3 text-xs text-white/50">🖥️ {t("ui.hintDesktop")}</div>}
+        </div>
+      )}
+
+      {tab === "admin" && (
+        <div className="space-y-3">
+          <div className="rounded-xl bg-[#ff4d6d]/15 p-3 text-sm font-bold text-white/90">
+            Режим админа доступен для ников: tortiladev, Andi
+          </div>
+          <label className="flex cursor-pointer items-center justify-between rounded-xl bg-white/5 px-4 py-3">
+            <span className="font-bold">🛡️ Режим админа</span>
+            <button
+              onClick={() => { sfx.click(); set("adminEnabled", !settings.adminEnabled as never); }}
+              className={`relative h-8 w-14 rounded-full transition ${settings.adminEnabled ? "bg-[#ff4d6d]" : "bg-white/20"}`}
+            >
+              <span className={`absolute top-1 h-6 w-6 rounded-full bg-white shadow transition-all ${settings.adminEnabled ? "left-7" : "left-1"}`} />
+            </button>
+          </label>
+          <div className="rounded-xl bg-black/20 p-3 text-xs text-white/70 space-y-1">
+            <div className="font-black text-white">Команды чата (T):</div>
+            <div>/help — список</div>
+            <div>/fly — полёт по лобби и уровням</div>
+            <div>/god — бессмертие</div>
+            <div>/coins N — выдать себе монеты</div>
+            <div>/give NAME N — выдать другому (локально)</div>
+            <div>/kick NAME · /ban NAME</div>
+          </div>
         </div>
       )}
     </Modal>
@@ -820,6 +877,104 @@ export function ReactionOverlay({ onDone, onClose }: { onDone: (ms: number) => v
         </div>
       </div>
       <button onClick={onClose} className="btn-candy absolute right-4 top-4 bg-[#ff4d6d] px-4 py-2 text-lg">✕ {t("ui.close")}</button>
+    </div>
+  );
+}
+
+
+// ---------------- Character Designer ----------------
+export function CharacterDesignerModal({ profile, onEquip, onSlots, onColor, onClose, onRotate }: {
+  profile: Profile;
+  onEquip: (id: string) => void;
+  onSlots: (slots: [string, string, string, string]) => void;
+  onColor: (c: string) => void;
+  onClose: () => void;
+  onRotate?: () => void;
+}) {
+  const [tab, setTab] = useState<Category | "color" | "slots">("skin");
+  const owned = new Set(profile.owned);
+  // badges: shop badges + achievement icons as wearable badges
+  const achBadges = (profile.achievements ?? []).map((id) => {
+    const a = ACHIEVEMENTS.find((x) => x.id === id);
+    return a ? { id: `achbadge_${a.id}`, cat: "badge" as Category, price: 0, color: "#ffd23f", icon: a.icon, rarity: "rare" as const } : null;
+  }).filter(Boolean) as typeof SHOP;
+  const items = tab === "color" || tab === "slots" ? []
+    : tab === "badge"
+      ? [...SHOP.filter((s) => s.cat === "badge" && (s.price === 0 || owned.has(s.id))), ...achBadges]
+      : SHOP.filter((s) => s.cat === tab && (s.price === 0 || owned.has(s.id)));
+  const slots = profile.emojiSlots ?? ["😀", "😂", "👍", "😭"];
+  const unlocked = profile.unlockedEmojis ?? slots;
+  return (
+    <div className="pointer-events-none fixed inset-0 z-40">
+      {/* Back button — top left */}
+      <button
+        onClick={onClose}
+        className="pointer-events-auto btn-candy absolute left-3 top-3 z-50 bg-[#1b1440]/90 px-4 py-2 text-sm font-black text-white shadow-lg"
+      >
+        ← Выйти назад
+      </button>
+      {/* Rotate camera — top center */}
+      <button
+        onClick={() => onRotate?.()}
+        className="pointer-events-auto btn-candy absolute left-1/2 top-3 z-50 -translate-x-1/2 bg-[#7b5cff] px-5 py-2 text-sm font-black text-white shadow-lg"
+      >
+        🔄 Вращать
+      </button>
+      {/* Right panel only — no overlay blur, so 3D stays sharp */}
+      <div className="pointer-events-auto absolute bottom-0 right-0 top-0 flex w-full max-w-md flex-col overflow-y-auto bg-[#1b1440]/92 p-4 text-white shadow-2xl md:w-[28rem]">
+        <div className="mb-3 game-title text-2xl">🎨 Дизайн персонажа</div>
+        <div className="mb-3 flex flex-wrap gap-1.5">
+          {(["skin", "hat", "footprint", "landing", "death", "aura", "trail", "emoji", "badge", "color", "slots"] as const).map((c) => (
+            <button key={c} onClick={() => setTab(c)}
+              className={`rounded-full px-2.5 py-1 text-xs font-extrabold ${tab === c ? "bg-[#ffd23f] text-[#1b1440]" : "bg-white/10 text-white"}`}>
+              {c === "color" ? "🎨 Цвет" : c === "slots" ? "1–4 Эмодзи" : catLabel(c as Category)}
+            </button>
+          ))}
+        </div>
+        {tab === "color" && (
+          <div className="grid grid-cols-6 gap-2">
+            {(profile.unlockedColors ?? []).map((c) => (
+              <button key={c} onClick={() => onColor(c)} className="h-10 rounded-xl border-2" style={{ background: c, borderColor: profile.color === c ? "#fff" : "transparent" }} />
+            ))}
+          </div>
+        )}
+        {tab === "slots" && (
+          <div className="space-y-3">
+            {[0, 1, 2, 3].map((slot) => (
+              <div key={slot} className="rounded-xl bg-white/5 p-2">
+                <div className="mb-1 text-xs font-bold text-white/60">Слот {slot + 1}: {slots[slot]}</div>
+                <div className="flex flex-wrap gap-1">
+                  {unlocked.map((e) => {
+                    const usedElsewhere = slots.some((s, i) => i !== slot && s === e);
+                    return (
+                      <button key={e + slot} disabled={usedElsewhere}
+                        onClick={() => {
+                          if (usedElsewhere) return;
+                          const next = [...slots] as [string, string, string, string];
+                          next[slot] = e;
+                          onSlots(next);
+                        }}
+                        className={`rounded-lg px-2 py-1 text-lg ${slots[slot] === e ? "bg-[#06d6a0]" : usedElsewhere ? "bg-white/5 opacity-30" : "bg-white/10"}`}
+                      >{e}</button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        {tab !== "color" && tab !== "slots" && (
+          <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
+            {items.map((it) => (
+              <button key={it.id} onClick={() => onEquip(it.id)}
+                className={`flex flex-col items-center rounded-xl border-2 p-2 ${profile.equipped[tab as Category] === it.id ? "border-[#7dffb0] bg-[#7dffb033]" : "border-white/10 bg-white/5"}`}>
+                <span className="text-2xl">{it.icon}</span>
+                <span className="mt-1 text-[10px] font-bold text-white/80">{itemName(it.id)}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

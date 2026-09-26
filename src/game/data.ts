@@ -136,6 +136,13 @@ export const SHOP: ShopItem[] = [
   mk("em_space", "emoji", 380, "#9b7bff", "🚀", "rare"),
   mk("em_chaos", "emoji", 420, "#ff4d6d", "💥", "rare"),
   mk("em_legend", "emoji", 900, "#ffd700", "👑", "epic"),
+  // 6 new packs
+  mk("em_nature", "emoji", 280, "#57cc99", "🌿", "common"),
+  mk("em_love", "emoji", 320, "#ff5fc8", "💕", "common"),
+  mk("em_music", "emoji", 360, "#9b5de5", "🎵", "rare"),
+  mk("em_tech", "emoji", 400, "#4cc9f0", "🤖", "rare"),
+  mk("em_magic", "emoji", 550, "#c77dff", "🪄", "rare"),
+  mk("em_vip", "emoji", 1200, "#ffd700", "💎", "epic"),
 
   // ---- extra hats ----
   mk("hat_beanie", "hat", 120, "#3a86ff", "🧶", "common"),
@@ -165,7 +172,7 @@ export const SHOP: ShopItem[] = [
 
 export const SKIN_IDS = SHOP.filter((s) => s.cat === "skin").map((s) => s.id);
 
-/** Exactly four emojis per pack — they map to keys 1-4. */
+/** Exactly four emojis per pack — they map to keys 1-4 by default. */
 export const EMOJI_PACKS: Record<string, string[]> = {
   em_basic: ["😀", "😂", "👍", "😭"],
   em_hype: ["🔥", "💯", "🚀", "🏆"],
@@ -177,7 +184,16 @@ export const EMOJI_PACKS: Record<string, string[]> = {
   em_space: ["🚀", "👽", "🌌", "🪐"],
   em_chaos: ["💥", "🌪️", "⚡", "🔥"],
   em_legend: ["👑", "💎", "🏆", "⭐"],
+  em_nature: ["🌿", "🌸", "🍄", "🍀"],
+  em_love: ["💕", "💖", "💗", "💘"],
+  em_music: ["🎵", "🎶", "🎤", "🎧"],
+  em_tech: ["🤖", "💻", "📡", "🛰️"],
+  em_magic: ["🪄", "✨", "🔮", "🧞"],
+  em_vip: ["💎", "👑", "🏆", "🌟"],
 };
+
+/** Flat pool of every emoji from all packs (for the emoji case). */
+export const ALL_EMOJIS: string[] = Array.from(new Set(Object.values(EMOJI_PACKS).flat()));
 
 /** 6 free starter colours (green, red, blue, yellow, purple, pink) */
 export const FREE_BODY_COLORS = ["#06d6a0", "#ff4d6d", "#3a86ff", "#ffd60a", "#8338ec", "#ff5fc8"];
@@ -220,6 +236,7 @@ export const CASES: CaseDef[] = [
   { id: "case_common", price: 200, icon: "📦", color: "#b8c0d8", odds: [78, 19, 3] },
   { id: "case_rare", price: 450, icon: "🎁", color: "#4cc9f0", odds: [40, 48, 12] },
   { id: "case_epic", price: 900, icon: "💎", color: "#d36bff", odds: [14, 41, 45] },
+  { id: "case_emoji", price: 150, icon: "😀", color: "#ffd84d", odds: [60, 30, 10] },
 ];
 
 export const CASE_DUPLICATE_REFUND = 0.35;
@@ -228,6 +245,8 @@ export interface CaseResult {
   item: ShopItem | null;
   /** unlocked body colour hex (from case colour drop) */
   color?: string;
+  /** single emoji unlocked from the emoji case */
+  emoji?: string;
   duplicate: boolean;
   refund: number;
 }
@@ -236,6 +255,7 @@ export interface CaseResult {
  * Rolls a case reward.
  * - Epic case (`case_epic`): 5% chance to unlock a random paid body colour.
  * - Other cases: small colour chance (1% / 2.5%).
+ * - Emoji case (`case_emoji`): always drops a random emoji.
  * Duplicates → coin refund.
  */
 export function rollCase(
@@ -243,7 +263,14 @@ export function rollCase(
   owned: string[],
   unlockedColors: string[] = [],
   rnd: () => number = Math.random,
+  unlockedEmojis: string[] = [],
 ): CaseResult {
+  // emoji case — always an emoji
+  if (def.id === "case_emoji") {
+    const e = ALL_EMOJIS[Math.floor(rnd() * ALL_EMOJIS.length)];
+    const already = unlockedEmojis.includes(e);
+    return { item: null, emoji: e, duplicate: already, refund: already ? 40 : 0 };
+  }
   // colour drop chance
   const colorChance = def.id === "case_epic" ? 0.05 : def.id === "case_rare" ? 0.025 : 0.01;
   if (rnd() < colorChance) {
@@ -280,9 +307,9 @@ export type BotDiff = "easy" | "mid" | "hard" | "mixed";
 export const BOT_DIFFS: BotDiff[] = ["easy", "mid", "hard", "mixed"];
 export const BOT_DIFF_ICON: Record<Exclude<BotDiff, "mixed">, string> = { easy: "🟢", mid: "🟡", hard: "🔴" };
 export const BOT_DIFF_STATS: Record<Exclude<BotDiff, "mixed">, { speed: [number, number]; fail: number; pushCd: [number, number]; emoji: [number, number] }> = {
-  easy: { speed: [4.9, 5.9], fail: 0.14, pushCd: [18, 32], emoji: [4, 14] },
-  mid: { speed: [6.2, 7.2], fail: 0.07, pushCd: [15, 24], emoji: [8, 22] },
-  hard: { speed: [7.6, 8.7], fail: 0.022, pushCd: [15, 18], emoji: [14, 30] },
+  easy: { speed: [4.6, 5.5], fail: 0.22, pushCd: [18, 32], emoji: [4, 14] },
+  mid: { speed: [5.8, 6.8], fail: 0.11, pushCd: [15, 24], emoji: [8, 22] },
+  hard: { speed: [7.0, 8.2], fail: 0.045, pushCd: [15, 18], emoji: [14, 30] },
 };
 
 /** Per-bot flavour so a lobby never feels like a pack of clones. */
@@ -330,6 +357,8 @@ export interface Settings {
   // visuals
   skyTheme: SkyTheme;
   weather: Weather;
+  /** admin panel unlocked (only for allowlisted nicks) */
+  adminEnabled?: boolean;
 }
 
 export const QUALITY_PRESETS: Record<Quality, Partial<Settings>> = {
@@ -348,6 +377,10 @@ export interface Profile {
   /** nick colour hex for lobby display */
   nickColor: string;
   unlockedNickColors: string[];
+  /** custom 4 hotbar emoji slots (any unlocked emoji) */
+  emojiSlots: [string, string, string, string];
+  /** individual emojis unlocked via packs / emoji case */
+  unlockedEmojis: string[];
   stats: Stats;
   achievements: string[];
   settings: Settings;
@@ -368,6 +401,7 @@ export const DEFAULT_EQUIP: Record<Category, string> = {
 
 export function defaultProfile(): Profile {
   const startColor = FREE_BODY_COLORS[Math.floor(Math.random() * FREE_BODY_COLORS.length)];
+  const basic = EMOJI_PACKS.em_basic;
   return {
     coins: 100,
     owned: SHOP.filter((s) => s.price === 0).map((s) => s.id),
@@ -376,6 +410,8 @@ export function defaultProfile(): Profile {
     unlockedColors: [...FREE_BODY_COLORS],
     nickColor: "#ffffff",
     unlockedNickColors: ["#ffffff"],
+    emojiSlots: [basic[0], basic[1], basic[2], basic[3]],
+    unlockedEmojis: [...basic],
     stats: {
       matches: 0, wins: 0, winStreak: 0, bestStreak: 0, podiums: 0, perfectJumps: 0, nearMisses: 0,
       pushes: 0, pushedTimes: 0, deaths: 0, jumps: 0, sectionsCleared: 0, soloRuns: 0, taRuns: 0,
@@ -404,9 +440,22 @@ export function mergeProfile(raw: unknown): Profile {
   if (!unlockedColors.includes(color) && !FREE_BODY_COLORS.includes(color)) {
     color = FREE_BODY_COLORS[0];
   }
+  const emojiSlotsRaw = (r as Profile).emojiSlots;
+  const emojiSlots: [string, string, string, string] =
+    Array.isArray(emojiSlotsRaw) && emojiSlotsRaw.length >= 4
+      ? [String(emojiSlotsRaw[0]), String(emojiSlotsRaw[1]), String(emojiSlotsRaw[2]), String(emojiSlotsRaw[3])]
+      : d.emojiSlots;
+  const unlockedEmojis = Array.isArray((r as Profile).unlockedEmojis)
+    ? Array.from(new Set([...d.unlockedEmojis, ...(r as Profile).unlockedEmojis]))
+    : [...d.unlockedEmojis];
+  const ownedList = Array.isArray(r.owned) ? Array.from(new Set([...d.owned, ...r.owned])) : d.owned;
+  for (const id of ownedList) {
+    const pack = EMOJI_PACKS[id];
+    if (pack) for (const e of pack) if (!unlockedEmojis.includes(e)) unlockedEmojis.push(e);
+  }
   return {
     coins: typeof r.coins === "number" ? r.coins : d.coins,
-    owned: Array.isArray(r.owned) ? Array.from(new Set([...d.owned, ...r.owned])) : d.owned,
+    owned: ownedList,
     equipped,
     color,
     unlockedColors,
@@ -414,6 +463,8 @@ export function mergeProfile(raw: unknown): Profile {
     unlockedNickColors: Array.isArray((r as Profile).unlockedNickColors)
       ? Array.from(new Set(["#ffffff", ...(r as Profile).unlockedNickColors]))
       : d.unlockedNickColors,
+    emojiSlots,
+    unlockedEmojis,
     stats: { ...d.stats, ...(r.stats ?? {}) },
     achievements: Array.isArray(r.achievements) ? r.achievements : [],
     settings: { ...d.settings, ...(r.settings ?? {}), skyTheme: (r.settings as Settings)?.skyTheme ?? d.settings.skyTheme, weather: (r.settings as Settings)?.weather ?? d.settings.weather },

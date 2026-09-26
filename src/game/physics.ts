@@ -87,6 +87,7 @@ export class Body {
   wallT = 9;
   wallBox: Box | null = null;
   wallrunT = 0;
+  wallJumpCd = 0;
   stun = 0;
   knock = 0;
   gravMul = 1;
@@ -163,6 +164,9 @@ function substep(b: Body, input: MoveInput, boxes: Box[], dt: number, first: boo
   if (ml > 1) { mx /= ml; mz /= ml; }
   let tvx = mx * maxSpeed, tvz = mz * maxSpeed;
   if (onGround && gs === "conveyor" && b.ground) { tvx += b.ground.convX; tvz += b.ground.convZ; }
+  // wind is part of the target velocity so player control cannot fully cancel it
+  tvx += b.windX * 0.85;
+  tvz += b.windZ * 0.85;
 
   // accelerate toward target horizontal velocity
   const dvx = tvx - b.v.x, dvz = tvz - b.v.z;
@@ -178,15 +182,14 @@ function substep(b: Body, input: MoveInput, boxes: Box[], dt: number, first: boo
     b.yaw += d * Math.min(1, dt * 16);
   }
 
-  // wind
-  b.v.x += b.windX * dt;
-  b.v.z += b.windZ * dt;
+  // vertical wind still applied as force
   b.v.y += b.windY * dt * b.up;
 
   // jumping
   if (onGround) b.coyote = 0.12;
   else b.coyote -= dt;
   b.wallT += dt;
+  b.wallJumpCd = Math.max(0, (b.wallJumpCd ?? 0) - dt);
 
   if (first && b.jumpBuf > 0 && canCtl) {
     if (b.coyote > 0) {
@@ -199,17 +202,20 @@ function substep(b: Body, input: MoveInput, boxes: Box[], dt: number, first: boo
       b.jumpBuf = 0;
       b.jumping = true;
       b.events.push("jump");
-    } else if (b.wallT < 0.2) {
+    } else if (b.wallT < 0.28 && (b.wallJumpCd ?? 0) <= 0) {
+      // stronger, more forgiving wall-jump + 0.4s cooldown between wall jumps
       const vn0 = b.v.x * b.wallNX + b.v.z * b.wallNZ;
       const tx = b.v.x - vn0 * b.wallNX, tz = b.v.z - vn0 * b.wallNZ;
-      b.v.x = tx * 0.9 + b.wallNX * 7.5;
-      b.v.z = tz * 0.9 + b.wallNZ * 7.5;
-      b.v.y = 11 * b.up;
+      const push = b.wallBox?.wallrun ? 9.2 : 7.8;
+      b.v.x = tx * 0.85 + b.wallNX * push;
+      b.v.z = tz * 0.85 + b.wallNZ * push;
+      b.v.y = (b.wallBox?.wallrun ? 12.2 : 11) * b.up;
       b.yaw = Math.atan2(b.v.x, b.v.z);
       b.wallT = 9;
+      b.wallJumpCd = 0.4;
       b.jumpBuf = 0;
       b.jumping = true;
-      b.knock = 0.18;
+      b.knock = 0.12;
       b.events.push("walljump");
     }
   }
@@ -220,11 +226,18 @@ function substep(b: Body, input: MoveInput, boxes: Box[], dt: number, first: boo
   if (goingUp && !input.jumpHeld && b.jumping) g *= 2.1; // variable jump height
   if (!goingUp) g *= 1.25;
   b.v.y -= g * dt * b.up;
-  // wall run slow fall
-  if (!b.grounded && b.wallT < 0.08 && b.wallBox && b.wallBox.wallrun && b.wallrunT < 1.6) {
+  // wall run: stick longer, slower fall, slight upward cling when holding into wall
+  if (!b.grounded && b.wallT < 0.22 && b.wallBox && b.wallBox.wallrun && b.wallrunT < 2.4) {
     const hs = Math.hypot(b.v.x, b.v.z);
-    if (hs > 2 && b.v.y * b.up < 0) {
-      b.v.y = Math.max(b.v.y * b.up, -1.2) * b.up;
+    const intoWall = input.mx * (-b.wallNX) + input.mz * (-b.wallNZ);
+    if (hs > 1.2 || intoWall > 0.15) {
+      if (b.v.y * b.up < 0) {
+        const minFall = intoWall > 0.2 ? -0.4 : -1.0;
+        b.v.y = Math.max(b.v.y * b.up, minFall) * b.up;
+      }
+      // gentle cling: pull slightly into wall so contact doesn't break
+      b.v.x -= b.wallNX * 2.5 * dt;
+      b.v.z -= b.wallNZ * 2.5 * dt;
       b.wallrunT += dt;
     }
   }

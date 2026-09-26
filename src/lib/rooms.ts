@@ -1,4 +1,8 @@
-// In-memory realtime room manager (single server process, global matchmaking).
+// In-memory realtime room manager + Postgres write-through (survives Netlify multi-instance).
+import { db } from "@/db";
+import { netRooms } from "@/db/schema";
+import { eq, and, lt, sql } from "drizzle-orm";
+
 export type NetState = number[]; // [x,y,z,yaw,anim,section,stunned,finished]
 
 export interface NetPlayer {
@@ -60,7 +64,7 @@ g.__rpmRooms = rooms;
 
 export const QUICK_WAIT_MS = 25000;
 export const QUICK_TARGET = 12;
-const PLAYER_TIMEOUT = 10000;
+const PLAYER_TIMEOUT = 45000;
 
 export function clampSections(n: number) {
   return Math.max(5, Math.min(25, Math.round(Number(n) || 5)));
@@ -335,4 +339,247 @@ export function validateMove(room: Room, p: NetPlayer, next: NetState, teleportO
 
 export function recentTeleport(p: NetPlayer, at: number) {
   return at > 0 && Date.now() - at < TELEPORT_GRACE_MS;
+}
+
+// ---------------------------------------------------------------- DB persistence (Netlify multi-instance)
+// Rooms live in Postgres so every serverless instance sees the same state.
+
+type RoomJson = Omit<Room, "players"> & { players: NetPlayer[] };
+
+function toJson(room: Room): RoomJson {
+  return {
+    id: room.id,
+    code: room.code,
+    name: room.name,
+    kind: room.kind,
+    hostId: room.hostId,
+    isPublic: room.isPublic,
+    quick: room.quick,
+    maxPlayers: room.maxPlayers,
+    status: room.status,
+    seed: room.seed,
+    sectionCount: room.sectionCount,
+    sectionMin: room.sectionMin,
+    sectionMax: room.sectionMax,
+    bots: room.bots,
+    botCount: room.botCount,
+    botDiff: room.botDiff,
+    startAt: room.startAt,
+    createdAt: room.createdAt,
+    firstFinishAt: room.firstFinishAt,
+    players: [...room.players.values()],
+    events: room.events,
+    seq: room.seq,
+  };
+}
+
+function fromJson(j: RoomJson): Room {
+  const players = new Map<string, NetPlayer>();
+  for (const p of j.players || []) players.set(p.id, p);
+  return {
+    id: j.id,
+    code: j.code,
+    name: j.name,
+    kind: j.kind,
+    hostId: j.hostId,
+    isPublic: j.isPublic,
+    quick: j.quick,
+    maxPlayers: j.maxPlayers,
+    status: j.status,
+    seed: j.seed,
+    sectionCount: j.sectionCount,
+    sectionMin: j.sectionMin,
+    sectionMax: j.sectionMax,
+    bots: j.bots,
+    botCount: j.botCount,
+    botDiff: j.botDiff,
+    startAt: j.startAt,
+    createdAt: j.createdAt,
+    firstFinishAt: j.firstFinishAt,
+    players,
+    events: j.events || [],
+    seq: j.seq || 0,
+  };
+}
+
+let schemaReady = false;
+export async function ensureRoomsSchema() {
+  if (schemaReady) return;
+  try {
+    await db.execute(sql`
+      CREATE TABLE IF NOT EXISTS net_rooms (
+        id TEXT PRIMARY KEY,
+        code TEXT NOT NULL UNIQUE,
+        kind TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'waiting',
+        data JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS net_rooms_code_idx ON net_rooms(code);
+      CREATE INDEX IF NOT EXISTS net_rooms_kind_status_idx ON net_rooms(kind, status);
+    `);
+    schemaReady = true;
+  } catch (e) {
+    console.error("[rooms] ensure schema", e);
+    // still try to use the table — it may already exist
+    schemaReady = true;
+  }
+}
+
+/** Load room by id from DB (and refresh memory cache). */
+export async function loadRoom(id: string): Promise<Room | null> {
+  await ensureRoomsSchema();
+  try {
+    const rows = await db.select().from(netRooms).where(eq(netRooms.id, id)).limit(1);
+    if (!rows.length) {
+      rooms.delete(id);
+      return null;
+    }
+    const room = fromJson(rows[0].data as RoomJson);
+    rooms.set(room.id, room);
+    return room;
+  } catch (e) {
+    console.error("[rooms] load", id, e);
+    return rooms.get(id) ?? null;
+  }
+}
+
+/** Load room by 5-char code. */
+export async function loadRoomByCode(code: string): Promise<Room | null> {
+  await ensureRoomsSchema();
+  const c = code.toUpperCase().trim();
+  try {
+    const rows = await db.select().from(netRooms).where(eq(netRooms.code, c)).limit(1);
+    if (!rows.length) return null;
+    const room = fromJson(rows[0].data as RoomJson);
+    rooms.set(room.id, room);
+    return room;
+  } catch (e) {
+    console.error("[rooms] loadByCode", c, e);
+    for (const r of rooms.values()) if (r.code === c) return r;
+    return null;
+  }
+}
+
+/** Persist room to Postgres (write-through). */
+export async function saveRoom(room: Room): Promise<void> {
+  rooms.set(room.id, room);
+  await ensureRoomsSchema();
+  const payload = toJson(room);
+  try {
+    await db
+      .insert(netRooms)
+      .values({
+        id: room.id,
+        code: room.code,
+        kind: room.kind,
+        status: room.status,
+        data: payload as never,
+        updatedAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: netRooms.id,
+        set: {
+          code: room.code,
+          kind: room.kind,
+          status: room.status,
+          data: payload as never,
+          updatedAt: new Date(),
+        },
+      });
+  } catch (e) {
+    console.error("[rooms] save", room.id, e);
+  }
+}
+
+/** Delete room from DB + memory. */
+export async function deleteRoom(id: string): Promise<void> {
+  rooms.delete(id);
+  try {
+    await ensureRoomsSchema();
+    await db.delete(netRooms).where(eq(netRooms.id, id));
+  } catch (e) {
+    console.error("[rooms] delete", id, e);
+  }
+}
+
+/** List public waiting match rooms (for lobby browser). */
+export async function listPublicRooms(): Promise<Room[]> {
+  await ensureRoomsSchema();
+  try {
+    const rows = await db
+      .select()
+      .from(netRooms)
+      .where(and(eq(netRooms.kind, "match"), eq(netRooms.status, "waiting")));
+    const out: Room[] = [];
+    for (const row of rows) {
+      const room = fromJson(row.data as RoomJson);
+      if (!room.isPublic || room.quick) continue;
+      rooms.set(room.id, room);
+      out.push(room);
+    }
+    return out;
+  } catch (e) {
+    console.error("[rooms] list", e);
+    return [...rooms.values()].filter((r) => r.kind === "match" && r.status === "waiting" && r.isPublic && !r.quick);
+  }
+}
+
+/** Find an open quick-match lobby. */
+export async function findQuickRoom(): Promise<Room | null> {
+  await ensureRoomsSchema();
+  try {
+    const rows = await db
+      .select()
+      .from(netRooms)
+      .where(and(eq(netRooms.kind, "match"), eq(netRooms.status, "waiting")));
+    for (const row of rows) {
+      const room = fromJson(row.data as RoomJson);
+      if (room.quick && room.players.size < room.maxPlayers) {
+        rooms.set(room.id, room);
+        return room;
+      }
+    }
+  } catch (e) {
+    console.error("[rooms] findQuick", e);
+  }
+  for (const r of rooms.values()) {
+    if (r.kind === "match" && r.quick && r.status === "waiting" && r.players.size < r.maxPlayers) return r;
+  }
+  return null;
+}
+
+/** Hub is always id "hub". */
+export async function loadHub(): Promise<Room> {
+  let hub = await loadRoom("hub");
+  if (!hub) {
+    hub = makeRoom({ id: "hub", kind: "hub", name: "Hub", hostId: "", isPublic: true, quick: false, maxPlayers: 999 });
+    rooms.set("hub", hub);
+    await saveRoom(hub);
+  }
+  return hub;
+}
+
+/** Cleanup stale rooms in DB. */
+export async function cleanupDb() {
+  await ensureRoomsSchema();
+  const now = Date.now();
+  try {
+    const rows = await db.select().from(netRooms);
+    for (const row of rows) {
+      const room = fromJson(row.data as RoomJson);
+      tick(room);
+      if (room.kind === "match" && (room.players.size === 0 || now - room.createdAt > 1000 * 60 * 40)) {
+        await deleteRoom(room.id);
+      } else {
+        await saveRoom(room);
+      }
+    }
+    // prune very old finished rooms
+    await db.delete(netRooms).where(
+      and(eq(netRooms.kind, "match"), lt(netRooms.updatedAt, new Date(now - 1000 * 60 * 45)))
+    );
+  } catch (e) {
+    console.error("[rooms] cleanupDb", e);
+  }
 }

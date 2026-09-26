@@ -406,27 +406,39 @@ export function buildHub(): Hub {
     course.animated.push({ obj: balloon, fn: (tt) => { balloon.position.y = 6.5 + Math.sin(tt * 1.1 + i) * 0.55; balloon.rotation.z = Math.sin(tt + i) * 0.12; } });
   }
 
-  // windmill (decorative) — blades clear of the tower body
+  // windmill (decorative) — clean cylinder + blades, dedicated geometries (no shared UV stretch)
   {
     const wx = -40, wz = -30;
-    // tower body
-    c.plat({ x: wx, y: 4.5, z: wz, w: 2.8, d: 2.8, h: 9, cyl: true, color: 0xf3e9dc, perfect: false });
-    c.deco(new THREE.ConeGeometry(2.0, 1.8, 8), 0xff5d8f, wx, 9.5, wz);
-    // hub on the FRONT face only (outside the cylinder)
+    const towerGeo = new THREE.CylinderGeometry(1.25, 1.45, 9, 16);
+    const towerMat = new THREE.MeshLambertMaterial({ color: 0xf3e9dc });
+    const tower = new THREE.Mesh(towerGeo, towerMat);
+    tower.position.set(wx, 4.5, wz);
+    tower.castShadow = false;
+    c.add(tower);
+    course.track(towerGeo);
+    // solid collision for the tower (invisible thin platform stack approx)
+    c.plat({ x: wx, y: 4.5, z: wz, w: 2.6, d: 2.6, h: 9, cyl: true, color: 0xf3e9dc, perfect: false, noMesh: true });
+    const roofGeo = new THREE.ConeGeometry(2.0, 1.8, 8);
+    const roof = new THREE.Mesh(roofGeo, new THREE.MeshLambertMaterial({ color: 0xff5d8f }));
+    roof.position.set(wx, 9.5, wz);
+    c.add(roof);
+    course.track(roofGeo);
     const rotor = new THREE.Group();
     rotor.position.set(wx, 6.2, wz + 1.55);
-    const hub = new THREE.Mesh(getUnitCyl(), mat(0x5a5a6e));
-    hub.scale.set(0.35, 0.25, 0.35);
-    hub.rotation.x = Math.PI / 2;
-    rotor.add(hub);
+    const hubGeo = new THREE.CylinderGeometry(0.28, 0.28, 0.35, 12);
+    const hubMesh = new THREE.Mesh(hubGeo, new THREE.MeshLambertMaterial({ color: 0x5a5a6e }));
+    hubMesh.rotation.x = Math.PI / 2;
+    rotor.add(hubMesh);
+    course.track(hubGeo);
     for (let i = 0; i < 4; i++) {
-      const blade = new THREE.Mesh(getUnitBox(), mat(0xf8f8ff));
-      blade.scale.set(0.28, 2.8, 0.07);
+      const bladeGeo = new THREE.BoxGeometry(0.28, 2.8, 0.08);
+      const blade = new THREE.Mesh(bladeGeo, new THREE.MeshLambertMaterial({ color: 0xf8f8ff }));
       blade.position.y = 1.5;
       const holder = new THREE.Group();
       holder.rotation.z = (i / 4) * Math.PI * 2;
       holder.add(blade);
       rotor.add(holder);
+      course.track(bladeGeo);
     }
     c.add(rotor);
     course.animated.push({ obj: rotor, fn: (tt) => { rotor.rotation.z = tt * 0.7; } });

@@ -54,6 +54,7 @@ interface Bot {
   stunEnd: number; frozen: number; pushCd: number; pos: THREE.Vector3; lastPrint: THREE.Vector3; printSide: number; fp: string;
   emoteDone: boolean; emojiT: number; section: number; diff: Exclude<BotDiff, "mixed">; kind: number; dying: boolean;
   style: BotStyle; aura: string; trail: string; auraT: number; cheered: number;
+  ability: string; abilityCd: number;
 }
 interface Snap { t: number; x: number; y: number; z: number; yaw: number; anim: number; extra: number; }
 interface Remote {
@@ -67,7 +68,7 @@ interface HubBot {
 }
 
 const EMOTE_CODES: Emote[] = ["", "win", "cheer", "dance", "wave", "flop"];
-const INTERP_DELAY = 110; // ms of deliberate lag so we always interpolate between two real snapshots
+const INTERP_DELAY = 40; // low lag so other players look near real-time
 const BOT_DIFF_ICON_MAP: Record<"easy" | "mid" | "hard", string> = { easy: "🟢", mid: "🟡", hard: "🔴" };
 const tmpV = new THREE.Vector3();
 const tmpV2 = new THREE.Vector3();
@@ -212,6 +213,10 @@ export class Engine {
   activeAbility = "ab_hit";
   lastPerfectBox: Box | null = null;
   lastPerfectAt = 0;
+  lastEdgeBox: Box | null = null;
+  lastEdgeAt = 0;
+  lastHubTag: string | null = null;
+  lastHubTagAt = 0;
   anchorUntil = 0;
   oilUntil = 0;
   oilPos = new THREE.Vector3();
@@ -224,6 +229,10 @@ export class Engine {
   /** cooldown after charges depleted */
   djCd = 0;
   abilityCd = 0;
+  adminFly = false;
+  adminGod = false;
+  designStudio = false;
+  roomGoneStrikes = 0;
   private cloudGroup = new THREE.Group();
   private startGrid: THREE.Vector3[] = [];
   private lastStun = 0;
@@ -449,6 +458,67 @@ export class Engine {
     this.specIndex = 0;
   }
 
+  private designPrevMode: Mode | null = null;
+  /** camera orbit angle around the character in design studio (0 = front face) */
+  designCamAngle = 0;
+  enterDesignStudio() {
+    this.designPrevMode = this.mode;
+    this.clearRace();
+    this.mode = "hub";
+    this.phase = "hub";
+    if (this.hub?.course) this.hub.course.group.visible = false;
+    for (const hb of this.hubBots) hb.char.root.visible = false;
+    for (const r of this.remotes.values()) r.char.root.visible = false;
+    this.body.reset(0, 1.2, 0, 0);
+    this.body.v.set(0, 0, 0);
+    this.body.yaw = 0;
+    this.designCamAngle = 0;
+    this.camYaw = Math.PI; // look from +Z toward origin → face the character
+    this.camPitch = 0.12;
+    this.char.root.visible = true;
+    this.input.enabled = false;
+    this.fogTarget = { near: 80, far: 200 };
+    // snap camera immediately in front
+    this.camTarget.set(0, 1.3, 0);
+    this.camera.position.set(0, 1.6, 4.2);
+    this.camera.lookAt(0, 1.3, 0);
+  }
+  leaveDesignStudio() {
+    if (this.hub?.course) this.hub.course.group.visible = true;
+    for (const hb of this.hubBots) hb.char.root.visible = true;
+    this.input.enabled = true;
+    this.enterHub();
+  }
+  /** User pressed "rotate" — orbit camera 45° around character. */
+  designRotate() {
+    this.designCamAngle += Math.PI / 4;
+  }
+  /** Fixed camera in front of character; character hovers, does not auto-spin. */
+  private designStudioTick(dt: number) {
+    if (!this.char?.root) return;
+    // hover in place, face fixed (yaw 0)
+    this.body.p.set(0, 1.25 + Math.sin(performance.now() / 900) * 0.12, 0);
+    this.body.v.set(0, 0, 0);
+    this.body.yaw = 0;
+    this.char.root.position.copy(this.body.p);
+    this.char.root.rotation.y = 0;
+    this.char.update(dt, { speed: 0, grounded: false, vy: 0, stunned: false, wall: false, up: 1 });
+    // camera orbits around character; 0 = front (face visible)
+    this.camTarget.set(0, 1.35, 0);
+    this.camYaw = this.designCamAngle + Math.PI;
+    this.camPitch = 0.1;
+    // force camera distance closer for portrait view
+    const dist = 3.8;
+    const cp = Math.cos(this.camPitch), sp = Math.sin(this.camPitch);
+    const want = tmpV2.set(
+      this.camTarget.x + Math.sin(this.camYaw) * cp * dist,
+      this.camTarget.y + sp * dist + 0.35,
+      this.camTarget.z + Math.cos(this.camYaw) * cp * dist,
+    );
+    this.camera.position.lerp(want, 1 - Math.exp(-dt * 10));
+    this.camera.lookAt(this.camTarget);
+  }
+
   enterHub() {
     this.clearRace();
     this.clearRemotes();
@@ -456,8 +526,10 @@ export class Engine {
     this.phase = "hub";
     this.hub.course.group.visible = true;
     for (const hb of this.hubBots) hb.char.root.visible = true;
-    const sp = this.hub.spawn;
-    this.body.reset(sp.x + (Math.random() - 0.5) * 4, sp.y + 1, sp.z + (Math.random() - 0.5) * 2, 0);
+    // Random spawn around the central fountain / plaza
+    const ang = Math.random() * Math.PI * 2;
+    const rad = 4 + Math.random() * 8;
+    this.body.reset(Math.cos(ang) * rad, 1.2, Math.sin(ang) * rad - 2, ang + Math.PI);
     this.camYaw = Math.PI;
     this.char.root.visible = true;
     this.resetMini(true);
@@ -517,6 +589,35 @@ export class Engine {
     this.raceOriginPerf = performance.now();
     this.placePlayerOnGrid(0);
   }
+
+  /** Pure client-side match with bots (no server room — fixes "no room" on serverless). */
+  startWithBots(botCount = 5, botDiff: BotDiff = "mixed", sectionCount = 15) {
+    this.spectating = false;
+    const seed = Math.floor(Math.random() * 1e9);
+    const bots = Math.max(1, Math.min(11, Math.round(botCount)));
+    const secs = Math.max(5, Math.min(25, Math.round(sectionCount)));
+    const fakeRoom: RoomInfo = {
+      id: "local_bots",
+      code: "LOCAL",
+      name: "Bots",
+      hostId: this.pid,
+      isPublic: false,
+      quick: false,
+      maxPlayers: bots + 1,
+      status: "countdown",
+      seed,
+      sectionCount: secs,
+      bots,
+      botCount: bots,
+      botDiff,
+      startAt: Date.now() + 3500,
+      createdAt: Date.now(),
+      waitLeft: null,
+      players: [{ id: this.pid, name: this.name || "You", look: {}, finishMs: null }],
+    };
+    this.room = fakeRoom;
+    this.startMulti(fakeRoom);
+  }
   startTA() {
     this.room = null;
     this.spectating = false;
@@ -527,11 +628,12 @@ export class Engine {
     this.raceOriginPerf = performance.now();
     this.placePlayerOnGrid(0);
   }
-  startPractice(sectionType: string) {
+  startPractice(sectionTypes: string | string[]) {
     this.room = null;
     this.spectating = false;
-    
-    const types = Array.from({ length: 25 }, () => sectionType);
+    const list = (Array.isArray(sectionTypes) ? sectionTypes : [sectionTypes]).filter(Boolean);
+    const pool = list.length ? list : ["stones"];
+    const types = Array.from({ length: 25 }, (_, i) => pool[i % pool.length]);
     this.setupRace("practice", Math.floor(Math.random() * 1e9), 25, types, 0.55);
     this.raceClock = -3;
     this.raceOriginClock = -3;
@@ -594,12 +696,14 @@ export class Engine {
       this.scene.add(ch.root);
       const gridPos = this.startGrid[(humans.length + i) % 12].clone();
       const st = BOT_DIFF_STATS[diff];
+      const abilities = ["ab_hit", "ab_hit", "ab_shove", "ab_blind", "ab_anchor"];
       const bot: Bot = {
         id: `bot_${i}`, name, color, char: ch, segs: [], finishT: 0, shift: 0, stunEnd: 0, frozen: 0,
         pushCd: rng.range(st.pushCd[0], st.pushCd[1]) * 0.4,
         pos: gridPos.clone(), lastPrint: gridPos.clone(), printSide: 1, fp, emoteDone: false,
         emojiT: rng.range(st.emoji[0], st.emoji[1]) * 0.35, section: 0, diff, kind: 0, dying: false,
         style: makeBotStyle(rng, diff), aura, trail, auraT: 0, cheered: 0,
+        ability: rng.pick(abilities), abilityCd: rng.range(4, 12),
       };
       this.buildBotSchedule(bot, new RNG(room.seed + i * 7919), gridPos, diff);
       this.bots.push(bot);
@@ -772,6 +876,44 @@ export class Engine {
         this.botsCheer(b.pos, "fall");
         if (b.pos.distanceTo(this.body.p) < 32) sfx.death();
       }
+      // Red hazard pushers knock bots too
+      if (this.course && lt > 0 && lt < b.finishT && !b.dying && raceT >= b.stunEnd) {
+        const si = this.course.sectionAt(b.pos.z);
+        for (let i = Math.max(0, si - 1); i <= Math.min(this.course.sections.length - 1, si + 1); i++) {
+          for (const box of this.course.sections[i].boxes) {
+            if (!box.active || box.hazard !== 1) continue;
+            const dx = b.pos.x - box.x, dz = b.pos.z - box.z;
+            const hx = box.hx + 0.45, hz = box.hz + 0.45;
+            if (Math.abs(dx) < hx && Math.abs(dz) < hz && b.pos.y < box.y + box.hy + 1.2 && b.pos.y > box.y - box.hy - 0.5) {
+              const len = Math.hypot(dx, dz) || 1;
+              b.pos.x += (dx / len) * 2.8;
+              b.pos.z += (dz / len) * 2.8;
+              b.pos.y += 1.2;
+              b.shift += 0.9;
+              b.stunEnd = raceT + 0.7;
+              this.fx.burst(b.pos.clone().setY(b.pos.y + 0.5), 0xff3355, 10, 5);
+              break;
+            }
+          }
+        }
+      }
+      // Apply course wind zones to bots (scripted paths otherwise ignore physics wind)
+      if (this.course && lt > 0 && lt < b.finishT && !b.dying) {
+        let wx = 0, wz = 0;
+        const si = this.course.sectionAt(b.pos.z);
+        for (let i = Math.max(0, si - 1); i <= Math.min(this.course.sections.length - 1, si + 1); i++) {
+          for (const z of this.course.sections[i].zones) {
+            if (z.type !== "wind") continue;
+            if (inZone(z, b.pos.x, b.pos.y + 0.8, b.pos.z)) {
+              wx += z.a; wz += z.c;
+            }
+          }
+        }
+        if (wx || wz) {
+          b.pos.x += wx * dt * 0.7;
+          b.pos.z += wz * dt * 0.7;
+        }
+      }
       const stunned = raceT < b.stunEnd;
       b.char.root.position.copy(b.pos);
       let d = yaw - b.char.root.rotation.y;
@@ -802,12 +944,30 @@ export class Engine {
         b.printSide *= -1;
         b.lastPrint.copy(b.pos);
       }
-      // bot pushes player (multi only)
+      // bot pushes / uses random abilities on player (multi only)
       if (this.mode === "multi" && this.phase === "run" && !stunned) {
         b.pushCd -= dt;
-        if (b.pushCd <= 0 && this.body.stun <= 0 && b.pos.distanceTo(this.body.p) < 2.4 && Math.random() < dt * (b.diff === "hard" ? 1.1 : b.diff === "mid" ? 0.8 : 0.45)) {
+        b.abilityCd -= dt;
+        const dist = b.pos.distanceTo(this.body.p);
+        if (b.pushCd <= 0 && this.body.stun <= 0 && dist < 2.4 && Math.random() < dt * (b.diff === "hard" ? 1.1 : b.diff === "mid" ? 0.8 : 0.45)) {
           b.pushCd = BOT_DIFF_STATS[b.diff].pushCd[0];
-          this.getPushed(b.pos, b.name);
+          // chance to use special ability instead of basic push
+          if (b.abilityCd <= 0 && b.ability !== "ab_hit" && Math.random() < 0.45) {
+            b.abilityCd = 10 + Math.random() * 8;
+            if (b.ability === "ab_shove") {
+              this.getPushed(b.pos, b.name);
+              this.body.v.y = Math.max(this.body.v.y, 6);
+              this.fx.burst(this.body.p.clone().setY(this.body.p.y + 1), 0xff3d7f, 18, 7);
+            } else if (b.ability === "ab_blind") {
+              this.cb.popup("🌑", "#1b1440");
+              this.fogTarget = { near: 1, far: 8 };
+              setTimeout(() => { this.fogTarget = { near: this.themeFog.near, far: this.themeFog.far }; }, 2500);
+            } else {
+              this.getPushed(b.pos, b.name);
+            }
+          } else {
+            this.getPushed(b.pos, b.name);
+          }
         }
         const st = BOT_DIFF_STATS[b.diff];
         b.emojiT -= dt * b.style.chatty;
@@ -1019,10 +1179,10 @@ export class Engine {
           .finally(() => { this.netBusyHub = false; });
       }
     }
-    if (this.room) {
+    if (this.room && this.room.id !== "local_bots") {
       this.netTimerRoom -= dt;
       if (this.netTimerRoom <= 0 && !this.netBusyRoom) {
-        this.netTimerRoom = this.mode === "multi" ? 0.1 : 0.5;
+        this.netTimerRoom = this.mode === "multi" ? 0.05 : 0.2;
         this.netBusyRoom = true;
         const ev = this.mode === "multi" ? this.outEvents.splice(0) : [];
         const t0 = Date.now();
@@ -1038,6 +1198,7 @@ export class Engine {
             const off = j.now - (t0 + t1) / 2;
             this.serverOffset = this.serverOffset === 0 ? off : this.serverOffset * 0.8 + off * 0.2;
             this.room = j.room;
+            this.roomGoneStrikes = 0;
             this.lastSeqRoom = j.seq;
             if (this.mode === "hub" && (j.room.status === "countdown" || j.room.status === "racing")) {
               this.startMulti(j.room);
@@ -1064,8 +1225,14 @@ export class Engine {
               return;
             }
             if (e.message === "gone" || e.message === "not in room") {
-              this.room = null;
-              if (this.mode === "hub") this.cb.toast("Лобби закрыто");
+              // Tolerate brief server blips (Netlify cold start / multi-instance).
+              // Only drop the room after several consecutive failures.
+              this.roomGoneStrikes = (this.roomGoneStrikes ?? 0) + 1;
+              if (this.roomGoneStrikes >= 4) {
+                this.room = null;
+                this.roomGoneStrikes = 0;
+                if (this.mode === "hub") this.cb.toast("Лобби закрыто");
+              }
             }
           })
           .finally(() => { this.netBusyRoom = false; });
@@ -1389,15 +1556,23 @@ export class Engine {
     if (!this.weatherPts || !this.weatherVel) return;
     const pos = this.weatherPts.geometry.attributes.position as THREE.BufferAttribute;
     const arr = pos.array as Float32Array;
-    const cx = this.body.p.x, cz = this.body.p.z;
+    const cx = this.body.p.x, cy = this.body.p.y, cz = this.body.p.z;
+    const floorY = cy - 8; // recycle below player, not world y=0
     for (let i = 0; i < arr.length / 3; i++) {
       arr[i * 3] += this.weatherVel[i * 3] * dt;
       arr[i * 3 + 1] += this.weatherVel[i * 3 + 1] * dt;
       arr[i * 3 + 2] += this.weatherVel[i * 3 + 2] * dt;
-      if (arr[i * 3 + 1] < 0) {
+      if (arr[i * 3 + 1] < floorY) {
         arr[i * 3] = cx + (Math.random() - 0.5) * 70;
-        arr[i * 3 + 1] = 25 + Math.random() * 15;
+        arr[i * 3 + 1] = cy + 18 + Math.random() * 20;
         arr[i * 3 + 2] = cz + (Math.random() - 0.5) * 70;
+      }
+      // keep particles roughly near the player horizontally
+      const dx = arr[i * 3] - cx, dz = arr[i * 3 + 2] - cz;
+      if (dx * dx + dz * dz > 55 * 55) {
+        arr[i * 3] = cx + (Math.random() - 0.5) * 60;
+        arr[i * 3 + 2] = cz + (Math.random() - 0.5) * 60;
+        arr[i * 3 + 1] = cy + 5 + Math.random() * 25;
       }
     }
     pos.needsUpdate = true;
@@ -1481,7 +1656,7 @@ export class Engine {
     course.syncMeshes();
 
     this.updatePlayer(dt, course, raceT);
-    if (this.mode === "hub") this.updateHubBots(dt);
+    if (this.mode === "hub") { if (this.designStudio) this.designStudioTick(dt); else { this.updateHubBots(dt); this.hubPadTick(); } }
     else this.updateBots(dt, raceT);
     this.updateRemotes(dt);
     this.updatePushTarget();
@@ -1555,11 +1730,12 @@ export class Engine {
     const fx = -Math.sin(this.camYaw), fz = -Math.cos(this.camYaw);
     const rx = -fz, rz = fx;
     const my = inp.moveY, mx = inp.moveX;
-    const jumpPressed = inp.consumeJump();
+    // Hold Space = continuous jump (auto-bunnyhop while grounded / coyote)
+    const jumpPressed = inp.consumeJump() || (inp.jumpHeld && (this.body.grounded || this.body.coyote > 0 || this.body.wallT < 0.25));
     if (inp.consumePush()) this.tryPush();
 
     // double-jump (ability): mid-air only, must land between uses, 3 charges then CD
-    if (this.activeAbility === "ab_double" && !frozen && jumpPressed && !this.body.grounded && this.body.coyote <= 0) {
+    if (this.activeAbility === "ab_double" && !frozen && jumpPressed && !this.body.grounded && this.body.coyote <= 0 && this.body.wallT >= 0.25) {
       if (this.djCd <= 0 && this.djCharges > 0 && !this.djUsedInAir) {
         this.body.v.y = Math.max(this.body.v.y, 9.2);
         this.body.jumping = true;
@@ -1576,8 +1752,8 @@ export class Engine {
       mx: frozen ? 0 : fx * my + rx * mx,
       mz: frozen ? 0 : fz * my + rz * mx,
       jumpHeld: inp.jumpHeld,
-      // suppress normal ground jump consumption when we already spent as double-jump... keep ground jumps
-      jumpPressed: jumpPressed && !frozen && (this.body.grounded || this.body.coyote > 0),
+      // hold-to-jump: fire while grounded, coyote, or briefly on wall
+      jumpPressed: jumpPressed && !frozen && (this.body.grounded || this.body.coyote > 0 || this.body.wallT < 0.25),
     };
     // zones pre-pass (wind, gravity, flip, fog)
     b.windX = b.windY = b.windZ = 0;
@@ -1650,7 +1826,20 @@ export class Engine {
     this.fog.far += (this.fogTarget.far - this.fog.far) * Math.min(1, dt * 3);
 
     const boxes = this.collectBoxes(course);
-    stepBody(b, move, boxes, dt);
+    if (this.adminFly) {
+      // free-fly: WASD horizontal, Space up, Ctrl down
+      const flySp = 14;
+      b.v.x = move.mx * flySp;
+      b.v.z = move.mz * flySp;
+      b.v.y = (move.jumpHeld || this.input.keys.has("Space") ? flySp * 0.7 : 0) + (this.input.keys.has("ControlLeft") || this.input.keys.has("ControlRight") || this.input.keys.has("ShiftLeft") ? -flySp * 0.7 : 0);
+      b.p.x += b.v.x * dt;
+      b.p.y += b.v.y * dt;
+      b.p.z += b.v.z * dt;
+      b.grounded = false;
+      b.ground = null;
+    } else {
+      stepBody(b, move, boxes, dt);
+    }
 
     // events
     for (const e of b.events) {
@@ -1691,11 +1880,19 @@ export class Engine {
             this.fx.ring(b.p, 0xffe14d, 2.5);
           }
         } else if (L.edge) {
-          this.combo = 0;
-          sfx.nearMiss();
-          this.cb.stat("nearMisses", 1);
-          this.cb.popup(t("pop.nearMiss"), "#ff9f1c");
-          this.addShake(0.12);
+          // anti-farm: jumping in place on the same edge does not spam near-miss
+          const now = performance.now();
+          const sameBox = this.lastEdgeBox === L.box;
+          const tooSoon = sameBox && (now - this.lastEdgeAt < 1800);
+          if (!tooSoon) {
+            this.combo = 0;
+            sfx.nearMiss();
+            this.cb.stat("nearMisses", 1);
+            this.cb.popup(t("pop.nearMiss"), "#ff9f1c");
+            this.addShake(0.12);
+            this.lastEdgeBox = L.box;
+            this.lastEdgeAt = now;
+          }
         } else this.combo = 0;
       }
       if (this.mode === "hub") this.hubLand(L.box, L.air);
@@ -1792,6 +1989,7 @@ export class Engine {
   }
 
   die() {
+    if (this.adminGod || this.adminFly) return;
     if (this.deadT > 0 || this.phase === "finished") return;
     const b = this.body;
     const it = item(this.look.death);
@@ -2042,9 +2240,24 @@ export class Engine {
     if (this.course) relocalizeFinish(this.course);
   }
 
+  /** Trigger hub pads by standing on them (no jump required). */
+  private hubPadTick() {
+    if (this.mode !== "hub" || !this.body.grounded || !this.body.ground) return;
+    const tag = this.hub.tags.get(this.body.ground);
+    if (!tag) return;
+    // fire as if landed; internal cooldowns prevent spam
+    this.hubLand(this.body.ground, 1);
+  }
+
   private hubLand(box: Box, air: number) {
     const tag = this.hub.tags.get(box);
     const now = performance.now();
+    // debounce pad triggers (walking on pad shouldn't re-open every frame)
+    if (tag && tag !== "balance" && tag !== "target") {
+      if (this.lastHubTag === tag && now - this.lastHubTagAt < 1200) return;
+      this.lastHubTag = tag;
+      this.lastHubTagAt = now;
+    }
     switch (tag) {
       case "mini_start":
         if (this.mini?.name !== "parkour") this.startMini("parkour");
@@ -2187,6 +2400,7 @@ export class Engine {
   // ------------------------------------------------------------------ camera/hud
   private updateCamera(dt: number) {
     const b = this.body;
+    if (this.designStudio) return; // design studio owns the camera
     if (this.spectating) { this.updateSpecCamera(dt); return; }
     const hs = Math.hypot(b.v.x, b.v.z);
     if (this.phase === "finished") this.camYaw += dt * 0.5;

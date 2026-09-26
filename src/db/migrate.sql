@@ -35,3 +35,16 @@ CREATE TABLE IF NOT EXISTS mini_scores (
 );
 
 CREATE INDEX IF NOT EXISTS mini_scores_time_ms_idx ON mini_scores(time_ms);
+
+-- Multiplayer rooms (shared across Netlify instances)
+CREATE TABLE IF NOT EXISTS net_rooms (
+  id TEXT PRIMARY KEY,
+  code TEXT NOT NULL UNIQUE,
+  kind TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'waiting',
+  data JSONB NOT NULL DEFAULT '{}'::jsonb,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS net_rooms_code_idx ON net_rooms(code);
+CREATE INDEX IF NOT EXISTS net_rooms_kind_status_idx ON net_rooms(kind, status);

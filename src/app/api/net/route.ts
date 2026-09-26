@@ -3,15 +3,20 @@ import {
   clampSections,
   validateMove,
   cleanup,
-  getHub,
+  cleanupDb,
+  deleteRoom,
+  findQuickRoom,
+  loadHub,
+  loadRoom,
+  loadRoomByCode,
+  listPublicRooms,
   makeRoom,
   normalizeName,
-  nameTakenInRoom,
   uniqueNameInRoom,
   pushEvents,
   removePlayer,
   roomSummary,
-  rooms,
+  saveRoom,
   startRoom,
   tick,
   type Room,
@@ -92,7 +97,7 @@ export async function POST(req: Request) {
   const pid = String(b.pid ?? "").slice(0, 40);
   if (!pid) return Response.json({ error: "no pid" }, { status: 400 });
   const look = b.look && typeof b.look === "object" ? b.look : {};
-  if (Math.random() < 0.05) cleanup();
+  if (Math.random() < 0.03) void cleanupDb().catch(() => {});
 
   const resolved = await resolvePlayerName(String(b.name ?? "Guest"));
   if (resolved.error && b.op !== "leave" && b.op !== "list" && b.op !== "poll") {
@@ -107,23 +112,21 @@ export async function POST(req: Request) {
 
   switch (b.op) {
     case "hub": {
-      const hub = getHub();
+      const hub = await loadHub();
       const p = addPlayer(hub, { id: pid, name, look, registered });
       p.look = look;
-      // keep unique in hub among online guests
       p.name = uniqueNameInRoom(hub, name, pid);
       if (Array.isArray(b.s)) p.s = b.s.slice(0, 8).map(Number);
       p.lastSeen = Date.now();
       pushEvents(hub, pid, b.ev);
       tick(hub);
-      let online = hub.players.size;
-      for (const r of rooms.values()) if (r.kind === "match") online += r.players.size;
+      await saveRoom(hub);
+      const online = hub.players.size;
       return Response.json({ players: others(hub, pid, 30), events: events(hub, pid, b.lastSeq ?? 0), seq: hub.seq, online });
     }
     case "list": {
-      cleanup();
-      const list = [...rooms.values()]
-        .filter((r) => r.kind === "match" && r.isPublic && r.status === "waiting" && r.players.size < r.maxPlayers)
+      const list = (await listPublicRooms())
+        .filter((r) => r.players.size < r.maxPlayers)
         .map(roomSummary)
         .slice(0, 30);
       return Response.json({ rooms: list });
@@ -144,35 +147,41 @@ export async function POST(req: Request) {
         sectionMax: clampSections(Number(b.sectionMax ?? 25)),
       });
       addPlayer(room, { id: pid, name, look, registered });
+      await saveRoom(room);
       return Response.json({ room: roomSummary(room) });
     }
     case "quick": {
-      cleanup();
-      let room = [...rooms.values()].find(
-        (r) => r.kind === "match" && r.quick && r.status === "waiting" && r.players.size < r.maxPlayers,
-      );
+      let room = await findQuickRoom();
       if (!room) {
         room = makeRoom({ kind: "match", name: "Quick Match", hostId: pid, isPublic: true, quick: true, maxPlayers: 12 });
       }
       addPlayer(room, { id: pid, name, look, registered });
+      tick(room);
+      await saveRoom(room);
       return Response.json({ room: roomSummary(room) });
     }
     case "join": {
       const code = String(b.code ?? "").toUpperCase().trim();
-      const room = [...rooms.values()].find((r) => r.kind === "match" && (r.code === code || r.id === code));
+      let room = await loadRoomByCode(code);
+      if (!room) room = await loadRoom(code);
       if (!room) return Response.json({ error: "Лобби не найдено" }, { status: 404 });
       if (room.status !== "waiting") return Response.json({ error: "Матч уже начался" }, { status: 409 });
       if (room.players.size >= room.maxPlayers) return Response.json({ error: "Лобби заполнено" }, { status: 409 });
       addPlayer(room, { id: pid, name, look, registered });
+      await saveRoom(room);
       return Response.json({ room: roomSummary(room) });
     }
     case "leave": {
-      const room = rooms.get(String(b.roomId));
-      if (room) removePlayer(room, pid);
+      const room = await loadRoom(String(b.roomId));
+      if (room) {
+        removePlayer(room, pid);
+        if (room.kind === "match" && room.players.size === 0) await deleteRoom(room.id);
+        else await saveRoom(room);
+      }
       return Response.json({ ok: true });
     }
     case "bots": {
-      const room = rooms.get(String(b.roomId));
+      const room = await loadRoom(String(b.roomId));
       if (!room) return Response.json({ error: "no room" }, { status: 404 });
       if (room.hostId !== pid) return Response.json({ error: "Only the host can change bots" }, { status: 403 });
       room.botCount = Math.max(0, Math.min(room.maxPlayers - 1, Math.round(Number(b.botCount) || 0)));
@@ -180,17 +189,19 @@ export async function POST(req: Request) {
       room.botDiff = d === "easy" || d === "mid" || d === "hard" ? d : "mixed";
       if (b.sectionMin !== undefined) room.sectionMin = clampSections(Number(b.sectionMin));
       if (b.sectionMax !== undefined) room.sectionMax = clampSections(Number(b.sectionMax));
+      await saveRoom(room);
       return Response.json({ room: roomSummary(room) });
     }
     case "start": {
-      const room = rooms.get(String(b.roomId));
+      const room = await loadRoom(String(b.roomId));
       if (!room) return Response.json({ error: "no room" }, { status: 404 });
       if (room.hostId !== pid) return Response.json({ error: "Только хост может начать" }, { status: 403 });
       startRoom(room, !!b.fillBots);
+      await saveRoom(room);
       return Response.json({ room: roomSummary(room) });
     }
     case "sync": {
-      const room = rooms.get(String(b.roomId));
+      const room = await loadRoom(String(b.roomId));
       if (!room) return Response.json({ error: "gone" }, { status: 404 });
       const p = room.players.get(pid);
       if (!p) return Response.json({ error: "not in room" }, { status: 404 });
@@ -205,6 +216,7 @@ export async function POST(req: Request) {
           correction = v.corrected ?? p.s;
           if (v.kick) {
             removePlayer(room, pid);
+            await saveRoom(room);
             return Response.json({ error: "kicked" }, { status: 403 });
           }
           if (v.warn) cheatMsg = "warn";
@@ -216,6 +228,11 @@ export async function POST(req: Request) {
       }
       pushEvents(room, pid, b.ev);
       tick(room);
+      if (room.kind === "match" && room.players.size === 0) {
+        await deleteRoom(room.id);
+      } else {
+        await saveRoom(room);
+      }
       return Response.json({
         room: roomSummary(room),
         players: others(room, pid),

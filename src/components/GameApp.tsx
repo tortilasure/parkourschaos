@@ -16,14 +16,14 @@ import {
 } from "@/lib/crazygames";
 import {
   AchievementsModal, AuthModal, Btn, CaseOpenOverlay, CreateLobbyModal, LeaderboardModal, LobbyBrowserModal,
-  ProfileModal, ReactionOverlay, ResultsModal, SettingsModal, ShopModal, addScore, miniValueText, type ScoreKey,
+  CharacterDesignerModal, ProfileModal, ReactionOverlay, ResultsModal, SettingsModal, ShopModal, addScore, miniValueText, type ScoreKey,
 } from "./Menus";
 
 const REWARD_COINS = 50;
 const AD_REWARD_CD_MS = 30_000;
 const AD_REWARD_LS_KEY = "rpm_ad_reward_at";
 
-type ModalKind = "shop" | "profile" | "ach" | "settings" | "board" | "browse" | "create" | "auth" | "practice" | "trade" | null;
+type ModalKind = "shop" | "profile" | "ach" | "settings" | "board" | "browse" | "create" | "auth" | "practice" | "trade" | "design" | null;
 interface Popup { id: number; text: string; color: string; big: boolean; }
 interface Toast { id: number; text: string; icon: string; }
 interface User { id: number; username: string; profile: unknown; }
@@ -78,6 +78,48 @@ export default function GameApp() {
   const [onlineOpen, setOnlineOpen] = useState(false);
   const [onlineList, setOnlineList] = useState<{ id: string; name: string; registered: boolean }[]>([]);
   const chatId = useRef(1);
+  const ADMIN_NAMES = ["tortiladev", "Andi", "andi"];
+  const isAdminUser = () => {
+    const n = (user?.username || name || "").toLowerCase();
+    const allow = ADMIN_NAMES.some((a) => a.toLowerCase() === n);
+    return allow && !!profile.settings?.adminEnabled;
+  };
+  const handleAdminCommand = (msg: string): boolean => {
+    if (!isAdminUser()) return false;
+    const parts = msg.slice(1).trim().split(/\s+/);
+    const cmd = (parts[0] || "").toLowerCase();
+    const e = engineRef.current;
+    if (cmd === "help") {
+      toast("/fly /god /coins N /give NAME N /kick NAME /ban NAME", "🛡️");
+      return true;
+    }
+    if (cmd === "fly" && e) {
+      e.adminFly = !e.adminFly;
+      toast(e.adminFly ? "Fly ON" : "Fly OFF", "🛡️");
+      return true;
+    }
+    if (cmd === "god" && e) {
+      e.adminGod = !e.adminGod;
+      toast(e.adminGod ? "God ON" : "God OFF", "🛡️");
+      return true;
+    }
+    if (cmd === "coins") {
+      const n = Math.max(0, Math.min(99999, parseInt(parts[1] || "0", 10) || 0));
+      mutate((p) => ({ ...p, coins: p.coins + n }));
+      toast(`+${n} coins`, "🪙");
+      return true;
+    }
+    if (cmd === "give") {
+      toast(`Give ${parts[2] || 0} → ${parts[1] || "?"} (local only)`, "🛡️");
+      return true;
+    }
+    if (cmd === "kick" || cmd === "ban") {
+      toast(`${cmd} ${parts[1] || "?"} (local notice)`, "🛡️");
+      return true;
+    }
+    return false;
+  };
+
   const [pauseOpen, setPauseOpen] = useState(false);
   const [adBusy, setAdBusy] = useState(false);
   const [adCdLeft, setAdCdLeft] = useState(0);
@@ -339,11 +381,12 @@ export default function GameApp() {
   useEffect(() => { engineRef.current?.setLook(lookFrom(profile)); }, [profile.color, profile.equipped]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const pack = EMOJI_PACKS[profile.equipped.emoji] ?? EMOJI_PACKS.em_basic;
+  const slots = profile.emojiSlots ?? pack;
   useEffect(() => {
     const e = engineRef.current;
     if (!e) return;
-    e.emojiSlot = (i) => { if (pack[i]) e.emoji(pack[i]); };
-  }, [pack]);
+    e.emojiSlot = (i) => { const em = slots[i]; if (em) e.emoji(em); };
+  }, [slots]);
 
   useEffect(() => { engineRef.current?.setPaused(pauseOpen); }, [pauseOpen]);
   useEffect(() => {
@@ -425,6 +468,14 @@ export default function GameApp() {
   const leaveRoom = () => engineRef.current?.setRoom(null);
   const startSolo = () => { leaveRoom(); setModal(null); setResults(null); setPauseOpen(false); engineRef.current?.startSolo(); gameplayStart(); };
   const startTA = () => { leaveRoom(); setModal(null); setResults(null); setPauseOpen(false); engineRef.current?.startTA(); gameplayStart(); };
+  const startBots = () => {
+    leaveRoom();
+    setModal(null);
+    setResults(null);
+    setPauseOpen(false);
+    engineRef.current?.startWithBots(5, "mixed", 15);
+    gameplayStart();
+  };
   const leaveResults = async (next: () => void) => {
     setResults(null);
     setPauseOpen(false);
@@ -450,6 +501,13 @@ export default function GameApp() {
   };
   const caseResult = (res: CaseResult) => {
     mutate((p) => {
+      if (res.emoji) {
+        if (res.duplicate) {
+          return { ...p, coins: p.coins + res.refund, stats: { ...p.stats, coinsEarned: p.stats.coinsEarned + res.refund } };
+        }
+        toast(res.emoji, "😀");
+        return { ...p, unlockedEmojis: Array.from(new Set([...(p.unlockedEmojis ?? []), res.emoji!])) };
+      }
       if (res.color) {
         if (res.duplicate) {
           return { ...p, coins: p.coins + res.refund, stats: { ...p.stats, coinsEarned: p.stats.coinsEarned + res.refund } };
@@ -465,7 +523,11 @@ export default function GameApp() {
       if (res.duplicate) {
         return { ...p, coins: p.coins + res.refund, stats: { ...p.stats, coinsEarned: p.stats.coinsEarned + res.refund } };
       }
-      return { ...p, owned: p.owned.includes(res.item.id) ? p.owned : [...p.owned, res.item.id] };
+      const nextOwned = p.owned.includes(res.item.id) ? p.owned : [...p.owned, res.item.id];
+      let unlockedEmojis = p.unlockedEmojis ?? [];
+      const pack = EMOJI_PACKS[res.item.id];
+      if (pack) unlockedEmojis = Array.from(new Set([...unlockedEmojis, ...pack]));
+      return { ...p, owned: nextOwned, unlockedEmojis };
     });
   };
   const createRoom = async (o: { name: string; maxPlayers: number; isPublic: boolean; botCount: number; botDiff: BotDiff; sectionMin: number; sectionMax: number }) => {
@@ -496,19 +558,62 @@ export default function GameApp() {
   const hostStart = async (fillBots: boolean) => {
     const e = engineRef.current!;
     if (!e.room) return;
-    try { await e.post({ op: "start", roomId: e.room.id, fillBots }); } catch (err) { toast((err as Error).message, "⚠️"); }
+    try {
+      await e.post({ op: "start", roomId: e.room.id, fillBots });
+    } catch (err) {
+      // Serverless / room lost → start pure client-side bot match
+      const msg = (err as Error).message || "";
+      const bots = Math.max(1, e.room.botCount || (fillBots ? 5 : 3));
+      const diff = (e.room.botDiff as BotDiff) || "mixed";
+      const secs = e.room.sectionCount || 15;
+      e.startWithBots(bots, diff, secs);
+      toast(msg.includes("no room") ? "Локальный матч с ботами" : msg, "🤖");
+    }
   };
   const buy = (id: string) => {
     const it = SHOP.find((s) => s.id === id);
-    if (!it || profileRef.current.coins < it.price) return;
+    if (!it) return;
+    const pack = EMOJI_PACKS[id];
+    const unlocked = profileRef.current.unlockedEmojis ?? [];
+    const have = pack ? pack.filter((e) => unlocked.includes(e)).length : 0;
+    if (pack && have >= 4) return; // fully unlocked
+    const price = pack && it.price > 0
+      ? Math.max(0, Math.round(it.price * (1 - 0.15 * have)))
+      : it.price;
+    if (profileRef.current.coins < price) return;
     sfx.buy();
-    mutate((p) => ({ ...p, coins: p.coins - it.price, owned: [...p.owned, id], equipped: { ...p.equipped, [it.cat]: id } }));
+    mutate((p) => {
+      const unlockedEmojis = [...(p.unlockedEmojis ?? [])];
+      if (pack) for (const e of pack) if (!unlockedEmojis.includes(e)) unlockedEmojis.push(e);
+      return { ...p, coins: p.coins - price, owned: p.owned.includes(id) ? p.owned : [...p.owned, id], equipped: { ...p.equipped, [it.cat]: id }, unlockedEmojis };
+    });
     toast(t("toast.bought", { n: itemName(it.id) }), it.icon);
   };
   const equip = (id: string) => {
+    // support achievement badges (achbadge_*)
+    if (id.startsWith("achbadge_")) {
+      mutate((p) => ({ ...p, equipped: { ...p.equipped, badge: id } }));
+      return;
+    }
     const it = SHOP.find((s) => s.id === id);
     if (!it) return;
-    mutate((p) => ({ ...p, equipped: { ...p.equipped, [it.cat]: id } }));
+    mutate((p) => {
+      const next: typeof p = { ...p, equipped: { ...p.equipped, [it.cat]: id } };
+      if (it.cat === "emoji") {
+        const pack = EMOJI_PACKS[id];
+        if (pack) {
+          // unique emojis in slots
+          const used = new Set<string>();
+          const slots: string[] = [];
+          for (const e of pack) {
+            if (!used.has(e)) { slots.push(e); used.add(e); }
+          }
+          while (slots.length < 4) slots.push(pack[slots.length % pack.length]);
+          next.emojiSlots = [slots[0], slots[1], slots[2], slots[3]];
+        }
+      }
+      return next;
+    });
   };
   const auth = async (m: "login" | "register", u: string, pw: string) => {
     const r = await fetch("/api/auth", {
@@ -575,7 +680,13 @@ export default function GameApp() {
               if (e.key === "Enter") {
                 e.preventDefault();
                 const msg = chatInput.trim();
-                if (msg) engineRef.current?.sendChat(msg);
+                if (msg) {
+                  if (msg.startsWith("/") && handleAdminCommand(msg)) {
+                    /* consumed */
+                  } else {
+                    engineRef.current?.sendChat(msg);
+                  }
+                }
                 setChatInput("");
                 setChatOpen(false);
               }
@@ -634,7 +745,7 @@ export default function GameApp() {
         ))}
       </div>
 
-      {started && hud && (
+      {started && hud && modal !== "design" && (
         <>
           {/* top bar */}
           <div className="pointer-events-none absolute left-0 right-0 top-0 z-10 flex items-start justify-between p-2 md:p-3">
@@ -715,8 +826,8 @@ export default function GameApp() {
             </div>
           )}
 
-          {/* hub side menu */}
-          {mode === "hub" && (
+          {/* hub side menu — hidden in character design studio */}
+          {mode === "hub" && modal !== "design" && (
             <div className="absolute left-2 top-20 z-10 flex max-h-[calc(100%-9rem)] flex-col gap-1.5 overflow-y-auto pb-2 md:top-24 md:gap-2">
               <button onClick={() => setMenuOpen((o) => !o)} className="btn-candy mb-1 w-fit bg-[#ff5fc8] px-3 py-1.5 text-sm md:hidden">{menuOpen ? t("menu.hide") : t("menu.show")}</button>
               {menuOpen && !room && (
@@ -729,6 +840,7 @@ export default function GameApp() {
                 ["🏠", t("menu.create"), "#7b5cff", () => setModal("create"), false],
                 ["🔎", t("menu.find"), "#3a86ff", () => setModal("browse"), false],
                 ["🧍", t("menu.solo"), "#06d6a0", startSolo, false],
+                ["🤖", "Боты", "#ff6b6b", startBots, false],
                 ["⏱️", t("menu.ta"), "#ff9f1c", startTA, false],
                 ["🛒", t("menu.shop"), "#ffbe0b", () => setModal("shop"), false],
                 ["🏅", t("menu.ach"), "#f15bb5", () => setModal("ach"), false],
@@ -767,7 +879,7 @@ export default function GameApp() {
             </div>
           )}
 
-          {!results && !hud.spectating && <ActionBar isTouch={isTouch} hud={hud} engine={engineRef} pack={pack} scale={profile.settings.touchScale} left={profile.settings.leftHanded} />}
+          {!results && !hud.spectating && <ActionBar isTouch={isTouch} hud={hud} engine={engineRef} pack={slots as unknown as string[]} scale={profile.settings.touchScale} left={profile.settings.leftHanded} />}
           {isTouch && !results && !modal && !hud.spectating && <Joystick engine={engineRef} scale={profile.settings.touchScale} left={profile.settings.leftHanded} />}
           {hud.spectating && !results && (
             <SpectatorBar hud={hud} engine={engineRef} isTouch={isTouch} />
@@ -841,6 +953,7 @@ export default function GameApp() {
           def={openCase}
           owned={profile.owned}
           unlockedColors={profile.unlockedColors ?? FREE_BODY_COLORS}
+          unlockedEmojis={profile.unlockedEmojis ?? []}
           onDone={(res) => caseResult(res)}
           onEquip={equip}
           onClose={() => setOpenCase(null)}
@@ -895,7 +1008,37 @@ export default function GameApp() {
             if (!r.ok) { toast(j.error || t("auth.nameTaken"), "🚫"); return; }
           } catch { /* offline */ }
           setName(nm); nameRef.current = nm; localStorage.setItem("rpm_name", nm); engineRef.current?.setName(nm);
-        }} />}
+        }}
+        onDesign={() => {
+          setModal("design");
+          const e = engineRef.current;
+          if (e) { e.designStudio = true; e.enterDesignStudio(); }
+        }}
+      />}
+      {modal === "design" && (
+        <CharacterDesignerModal
+          profile={profile}
+          onClose={() => {
+            setModal("profile");
+            const e = engineRef.current;
+            if (e) { e.designStudio = false; e.leaveDesignStudio(); }
+          }}
+          onRotate={() => engineRef.current?.designRotate()}
+          onEquip={equip}
+          onColor={(c) => {
+            mutate((p) => ({ ...p, color: c }));
+            engineRef.current?.setLook(lookFrom({ ...profile, color: c }));
+          }}
+          onSlots={(slots) => {
+            const uniq = new Set(slots);
+            if (uniq.size < 4) {
+              toast("Нельзя 2 одинаковых эмодзи", "⚠️");
+              return;
+            }
+            mutate((p) => ({ ...p, emojiSlots: slots }));
+          }}
+        />
+      )}
       {modal === "ach" && <AchievementsModal profile={profile} onClose={() => setModal(null)} />}
       {modal === "settings" && (
         <SettingsModal
@@ -913,27 +1056,21 @@ export default function GameApp() {
       {modal === "auth" && <AuthModal onClose={() => setModal(null)} onDone={auth} />}
 
       {modal === "practice" && (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#0d0826]/60 p-3 backdrop-blur-sm">
-          <div className="panel modal-anim max-h-[80vh] w-full max-w-lg overflow-y-auto p-4 text-white">
-            <div className="mb-3 flex items-center justify-between">
-              <div className="game-title text-3xl">{t("mode.practice")}</div>
-              <button className="btn-candy bg-white/10 px-3 py-1" onClick={() => setModal(null)}>✕</button>
-            </div>
-            <p className="mb-3 text-sm text-white/70">{t("mode.practiceHint")}</p>
-            <div className="grid max-h-[50vh] grid-cols-2 gap-2 overflow-y-auto sm:grid-cols-3">
-              {SECTION_TYPES.filter((id) => id !== "start" && id !== "finish").map((id) => (
-                <button key={id} className="btn-candy bg-[#3a86ff]/80 px-2 py-2 text-left text-sm font-bold"
-                  onClick={() => { setModal(null); engineRef.current?.startPractice(id); toast(t("toast.practice", { n: t(`sec.${id}`) }), "🎯"); gameplayStart(); }}>
-                  {t(`sec.${id}`)}
-                </button>
-              ))}
-            </div>
-            <button className="btn-candy mt-3 w-full bg-[#ffd23f] py-3 text-lg font-black text-[#1b1440]"
-              onClick={() => { setModal(null); engineRef.current?.startWeekly(); toast(t("toast.weekly", { w: weeklyChallengeLabel() }), "📅"); gameplayStart(); }}>
-              📅 {t("mode.weekly")} — {weeklyChallengeLabel()}
-            </button>
-          </div>
-        </div>
+        <PracticePicker
+          onClose={() => setModal(null)}
+          onStart={(ids) => {
+            setModal(null);
+            engineRef.current?.startPractice(ids);
+            toast(t("toast.practice", { n: String(ids.length) }), "🎯");
+            gameplayStart();
+          }}
+          onWeekly={() => {
+            setModal(null);
+            engineRef.current?.startWeekly();
+            toast(t("toast.weekly", { w: weeklyChallengeLabel() }), "📅");
+            gameplayStart();
+          }}
+        />
       )}
 
     </div>
@@ -941,6 +1078,48 @@ export default function GameApp() {
 }
 
 // ---------------- quick search ----------------
+
+function PracticePicker({ onClose, onStart, onWeekly }: {
+  onClose: () => void; onStart: (ids: string[]) => void; onWeekly: () => void;
+}) {
+  const [sel, setSel] = useState<string[]>([]);
+  const toggle = (id: string) => setSel((s) => s.includes(id) ? s.filter((x) => x !== id) : [...s, id]);
+  const ids = SECTION_TYPES.filter((id) => id !== "start" && id !== "finish");
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#0d0826]/60 p-3 backdrop-blur-sm">
+      <div className="panel modal-anim max-h-[80vh] w-full max-w-lg overflow-y-auto p-4 text-white">
+        <div className="mb-3 flex items-center justify-between">
+          <div className="game-title text-3xl">{t("mode.practice")}</div>
+          <button className="btn-candy bg-white/10 px-3 py-1" onClick={onClose}>✕</button>
+        </div>
+        <p className="mb-2 text-sm text-white/70">{t("mode.practiceHint")}</p>
+        <p className="mb-3 text-xs text-white/50">Выбрано: {sel.length || 0}</p>
+        <div className="grid max-h-[45vh] grid-cols-2 gap-2 overflow-y-auto sm:grid-cols-3">
+          {ids.map((id) => {
+            const on = sel.includes(id);
+            return (
+              <button key={id}
+                className={`btn-candy px-2 py-2 text-left text-sm font-bold ${on ? "bg-[#06d6a0] ring-2 ring-white" : "bg-[#3a86ff]/80"}`}
+                onClick={() => toggle(id)}>
+                {on ? "✓ " : ""}{t(`sec.${id}`)}
+              </button>
+            );
+          })}
+        </div>
+        <button
+          className="btn-candy mt-3 w-full bg-[#06d6a0] py-3 text-lg font-black text-[#1b1440] disabled:opacity-40"
+          disabled={sel.length === 0}
+          onClick={() => onStart(sel)}>
+          ▶ Старт ({sel.length || 0})
+        </button>
+        <button className="btn-candy mt-2 w-full bg-[#ffd23f] py-3 text-lg font-black text-[#1b1440]" onClick={onWeekly}>
+          📅 {t("mode.weekly")} — {weeklyChallengeLabel()}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function QuickSearchPanel({ room, onCancel }: { room: RoomInfo; onCancel: () => void }) {
   const found = room.players.length;
   const secs = Math.ceil((room.waitLeft ?? 0) / 1000);
